@@ -263,6 +263,9 @@ def load_scored(cfg: dict, model: str) -> pd.DataFrame:
                        if line])
     if df.empty:
         raise RuntimeError(f"{path} is empty: run `make generate` first")
+    # correct arrives as object dtype from JSON (True/False/null);
+    # boolean dtype makes ~correct and .astype(int) behave correctly
+    df["correct"] = df["correct"].astype("boolean")
     return df
 
 

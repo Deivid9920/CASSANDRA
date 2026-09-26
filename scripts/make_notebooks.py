@@ -52,6 +52,8 @@ import matplotlib
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+from cassandra_ns.report.figures import save_figure
+
 if "google.colab" not in sys.modules:
     matplotlib.use("Agg")  # headless execution; Colab keeps its inline backend
 
