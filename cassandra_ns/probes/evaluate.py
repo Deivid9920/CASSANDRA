@@ -99,7 +99,13 @@ def _baseline_auc(y: np.ndarray, base: np.ndarray) -> float:
 
 
 def aggregate(cfg: dict) -> pd.DataFrame:
-    """Aggregate OOF rows into the probe results table."""
+    """Aggregate OOF rows into the probe results table.
+
+    Incremental: overall + per-domain rows are appended per
+    configuration as soon as they are computed, and configurations
+    already present in the results file are skipped, so a long
+    bootstrap aggregation survives interruptions without recomputing.
+    """
     from cassandra_ns.data.loader import load_processed
 
     seed = int(cfg["seed"])
@@ -109,40 +115,59 @@ def aggregate(cfg: dict) -> pd.DataFrame:
 
     out_path = results_path(cfg)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    existing: set[tuple] = set()
+    if out_path.is_file():
+        with out_path.open(encoding="utf-8") as fh:
+            for line in fh:
+                row = json.loads(line)
+                existing.add((row["model"], int(row["layer"]), row["mode"],
+                              row["ptype"], row.get("domain")))
 
     group_cols = ["model", "layer", "mode", "ptype"]
     results: list[dict] = []
-    for key, group in oof.groupby(group_cols, sort=True):
-        model, layer, mode, ptype = key
-        y = group["y_true"].to_numpy().astype(int)
-        score = group["score"].to_numpy()
-        base = group["baseline"].to_numpy()
-        row = {"model": model, "layer": int(layer), "mode": mode,
-               "ptype": ptype,
-               "baseline_auc": _baseline_auc(y, base),
-               **_one_row(y, score, base, cfg["stats"], seed, None)}
-        results.append(row)
-        for domain, dgroup in group.groupby("domain"):
-            yd = dgroup["y_true"].to_numpy().astype(int)
-            if len(np.unique(yd)) < 2:
-                continue
-            drow = {"model": model, "layer": int(layer), "mode": mode,
-                    "ptype": ptype,
-                    "baseline_auc": _baseline_auc(yd, dgroup["baseline"]
-                                                  .to_numpy()),
-                    **_one_row(yd, dgroup["score"].to_numpy(),
-                               dgroup["baseline"].to_numpy(),
-                               cfg["stats"], seed, domain)}
-            results.append(drow)
-        print(f"  + {key}: overall AUC {row['auc']:.3f} "
-              f"[{row['ci_lo']:.3f}, {row['ci_hi']:.3f}]")
+    with out_path.open("a", encoding="utf-8") as fh:
+        for key, group in oof.groupby(group_cols, sort=True):
+            model, layer, mode, ptype = key
+            y = group["y_true"].to_numpy().astype(int)
+            score = group["score"].to_numpy()
+            base = group["baseline"].to_numpy()
+
+            overall_rows = existing and (model, int(layer), mode, ptype,
+                                         None) in existing
+            if not overall_rows:
+                row = {"model": model, "layer": int(layer), "mode": mode,
+                       "ptype": ptype,
+                       "baseline_auc": _baseline_auc(y, base),
+                       **_one_row(y, score, base, cfg["stats"], seed,
+                                  None)}
+                fh.write(json.dumps(row) + "\n")
+                fh.flush()
+                results.append(row)
+                print(f"  + {key}: overall AUC {row['auc']:.3f} "
+                      f"[{row['ci_lo']:.3f}, {row['ci_hi']:.3f}]",
+                      flush=True)
+            for domain, dgroup in group.groupby("domain"):
+                if (model, int(layer), mode, ptype, domain) in existing:
+                    continue
+                yd = dgroup["y_true"].to_numpy().astype(int)
+                if len(np.unique(yd)) < 2:
+                    continue
+                drow = {"model": model, "layer": int(layer),
+                        "mode": mode, "ptype": ptype,
+                        "baseline_auc": _baseline_auc(
+                            yd, dgroup["baseline"].to_numpy()),
+                        **_one_row(yd, dgroup["score"].to_numpy(),
+                                   dgroup["baseline"].to_numpy(),
+                                   cfg["stats"], seed, domain)}
+                fh.write(json.dumps(drow) + "\n")
+                fh.flush()
 
     table = pd.DataFrame(results)
-    with out_path.open("w", encoding="utf-8") as fh:
-        for _, r in table.iterrows():
-            fh.write(json.dumps({k: (None if (isinstance(v, float)
-                                             and np.isnan(v)) else v)
-                                 for k, v in r.items()}) + "\n")
+    if out_path.is_file():
+        all_rows = [json.loads(line) for line in
+                    out_path.read_text(encoding="utf-8").splitlines()
+                    if line]
+        table = pd.DataFrame(all_rows)
     return table
 
 
