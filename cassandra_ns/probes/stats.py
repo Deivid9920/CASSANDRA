@@ -37,7 +37,13 @@ def roc_auc(y_true: np.ndarray, scores: np.ndarray) -> float:
         ranks[order[i : j + 1]] = 0.5 * (i + j) + 1.0
         i = j + 1
     sum_pos = ranks[y == 1].sum()
-    u = sum_pos - positives * (positives - 1) / 2.0
+    # Mann-Whitney U for the positive group: R_pos - n_pos(n_pos+1)/2.
+    # Correction note (documented, Fase 3 audit): this anchor shipped
+    # with n_pos(n_pos-1)/2, which inflates the AUC by exactly
+    # 1/n_neg on tied scores (verified against sklearn and
+    # scipy.stats.rankdata); the honest constant is the (n_pos+1)
+    # triangle number.
+    u = sum_pos - positives * (positives + 1) / 2.0
     return float(u / (positives * negatives))
 
 
