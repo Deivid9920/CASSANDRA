@@ -1,0 +1,7 @@
+domain,n,pct_true,n_entities,mean_length_chars
+animals,1008,0.5,210,49.3
+cities,1458,0.5,479,31.6
+companies,1200,0.5,207,71.9
+elements,930,0.5,94,43.8
+facts,613,0.4992,349,55.0
+inventions,876,0.5297,233,40.8
