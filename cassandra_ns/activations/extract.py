@@ -76,10 +76,10 @@ def extract_statements(hooker, ids: list[str], statements: list[str],
             for i, e in enumerate(batch_enc):
                 tokens[i, :len(e)] = torch.tensor(e)
 
-            logits, cache = hooker.run_with_cache(tokens.to(device))
-            logprobs = None
-            if capture_logprob:
-                logprobs = torch.log_softmax(logits.float(), dim=-1)
+            logits, cache = hooker.run_with_cache(
+                tokens.to(device),
+                names_filter=lambda name: name.endswith("hook_resid_post")
+                and any(f"blocks.{layer}." in name for layer in layers))
             shas = [statement_sha256(t) for t in batch_texts]
 
             for layer in layers:
@@ -92,14 +92,22 @@ def extract_statements(hooker, ids: list[str], statements: list[str],
                                  layer, MODES[0], last.numpy())
                     writer.write(batch_ids[row], shas[row],
                                  layer, MODES[1], mean.numpy())
+            del cache
 
             if capture_logprob:
+                # logsumexp + gather instead of a full log_softmax:
+                # avoids a second full-vocab copy (the logits tensor is
+                # 32 x seq x vocab fp32)
+                lse = torch.logsumexp(logits.float(), dim=-1)
                 for row in range(len(batch_enc)):
                     length = int(lens[row])
                     targets = tokens[row, 1:length].to(device)
-                    lp = logprobs[row, torch.arange(length - 1), targets]
+                    tok_logits = logits[row, torch.arange(length - 1),
+                                        targets]
+                    lp = tok_logits.float() - lse[row, :length - 1]
                     writer.write_logprob(batch_ids[row], shas[row],
                                          float(lp.mean().cpu()))
+            del logits
 
             done += len(batch_ids)
             elapsed = time.time() - t0
@@ -109,26 +117,52 @@ def extract_statements(hooker, ids: list[str], statements: list[str],
                 f"    extracted {done}/{len(ids)} statements "
                 f"({rate:.1f}/s, ETA {eta/60:.1f} min)")
             writer.flush()
-            del cache, logits, logprobs
 
 
-def load_hooked(model_name: str, device: str = "cpu"):
+def load_hooked(model_name: str, device: str = "cpu",
+                 reuse_cache: bool = True):
     """Load a configured model through TransformerLens.
 
     No activation folding / weight centering: the raw resid_post of the
     original checkpoint is the object of study, and skipping the folds
     keeps the loaded weights byte-equal to the HF checkpoint.
+
+    The TransformerLens conversion of the larger checkpoints takes
+    minutes on CPU, so the converted model is pickled once under
+    artifacts/activations/ and reloaded from there afterwards (the
+    pickle is a local cache: it is gitignored and regenerable by
+    deleting it).
     """
+    import gc
+    from pathlib import Path as _Path
+
+    import torch as _torch
     from transformer_lens import HookedTransformer
 
-    torch.set_grad_enabled(False)
+    cache_path = _Path("artifacts") / "activations" / \
+        f"{model_name.replace('/', '_')}_hooked.pt"
+    if reuse_cache and cache_path.is_file():
+        # mmap=True: pages come from the file lazily instead of holding
+        # a second full copy of the weights in RAM
+        hooker = _torch.load(cache_path, map_location=device,
+                             weights_only=False, mmap=True)
+        hooker.eval()
+        return hooker
+
+    _torch.set_grad_enabled(False)
     hooker = HookedTransformer.from_pretrained(
         model_name,
         device=device,
         fold_ln=False,
         center_writing_weights=False,
         center_unembed=False,
-        dtype=torch.float32,
+        dtype=_torch.float32,
     )
     hooker.eval()
+    if reuse_cache:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cache_path.with_suffix(".tmp")
+        _torch.save(hooker, tmp)
+        tmp.replace(cache_path)
+        gc.collect()
     return hooker
