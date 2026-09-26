@@ -365,20 +365,27 @@ def load_triviaqa_subset(cfg: dict) -> list[dict]:
 
 
 def string_match_correct(generation_text: str, aliases: list[str],
-                         normalized_aliases: list[str]) -> tuple[bool, str]:
+                         normalized_aliases: list[str],
+                         question_text: str = "") -> tuple[bool | None, str]:
     """Normalized string-match ground truth for one generation.
 
-    Returns (correct, match_status). status 'alias_match' when the
-    first declarative sentence contains a normalized gold alias on
-    word boundaries; 'no_alias' when it answers something else
-    (incorrect under the statistical ground truth, documented in the
-    README limits); callers flag non-declarative or boundary-ambiguous
-    cases themselves.
+    Returns (correct, match_status) where correct can be:
+    - True  ('alias_match'): the generation contains a normalized gold
+      alias on word boundaries, and at least one matched alias is NOT
+      already contained in the question (the model added information);
+    - None  ('alias_in_question'): every matched alias is a substring
+      of the question itself - the generation may be merely restating
+      the question, which string-match cannot disambiguate, so the
+      case is EXCLUDED and counted, never forced;
+    - False ('no_alias'): the generation names no gold alias: it is
+      incorrect under the statistical ground truth (documented in the
+      README limits).
     """
     if not generation_text.strip():
         return False, "empty"
     normalized_text = _normalize(generation_text)
     words = normalized_text.split()
+    matched_spans: list[list[str]] = []
     for alias in normalized_aliases:
         target = alias.split()
         span = len(target)
@@ -386,5 +393,18 @@ def string_match_correct(generation_text: str, aliases: list[str],
             continue
         for start in range(len(words) - span + 1):
             if words[start:start + span] == target:
-                return True, "alias_match"
-    return False, "no_alias"
+                matched_spans.append(target)
+                break
+    if not matched_spans:
+        return False, "no_alias"
+    if question_text:
+        question_words = _normalize(question_text).split()
+        q = " ".join(question_words)
+        adding_information = False
+        for target in matched_spans:
+            if " ".join(target) not in q:
+                adding_information = True
+                break
+        if not adding_information:
+            return None, "alias_in_question"
+    return True, "alias_match"
