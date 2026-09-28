@@ -75,8 +75,15 @@ def paired_bootstrap_diff_auc(y_true: np.ndarray, scores_a: np.ndarray,
     """Paired bootstrap for AUC(a) - AUC(b): same resampled indices for
     both systems, so the correlation between systems is preserved.
 
-    Returns {diff, lo, hi, p_two_sided}. p = 2 * min(P(diff>=0),
-    P(diff<=0)) over the bootstrap distribution, capped at 1.0.
+    Resamples that contain a single class have an undefined AUC; they
+    are REDRAWN (not interpolated) and the number of such draws is
+    reported as ``n_resamples_skipped``. On non-degenerate data the
+    count is 0 and the distribution is identical to the previous
+    unconditional scheme.
+
+    Returns {diff, lo, hi, p_two_sided, n_resamples_skipped}.
+    p = 2 * min(P(diff>=0), P(diff<=0)) over the bootstrap distribution,
+    capped at 1.0.
     """
     rng = np.random.default_rng(seed)
     y_true = np.asarray(y_true).astype(int)
@@ -86,15 +93,30 @@ def paired_bootstrap_diff_auc(y_true: np.ndarray, scores_a: np.ndarray,
     diff_point = roc_auc(y_true, scores_a) - roc_auc(y_true, scores_b)
     n = len(y_true)
     diffs = np.empty(n_boot, dtype=np.float64)
-    for b in range(n_boot):
+    skipped = 0
+    max_draws = 100 * n_boot
+    draws = 0
+    b = 0
+    while b < n_boot:
+        if draws >= max_draws:
+            raise ValueError(
+                f"bootstrap degenerate: {skipped} single-class resamples "
+                f"after {draws} draws; subset too small or too "
+                "class-imbalanced for a paired AUC bootstrap")
         idx = rng.integers(0, n, size=n)
-        diffs[b] = (roc_auc(y_true[idx], scores_a[idx])
-                    - roc_auc(y_true[idx], scores_b[idx]))
+        draws += 1
+        yb = y_true[idx]
+        if yb.min() == yb.max():
+            skipped += 1
+            continue
+        diffs[b] = roc_auc(yb, scores_a[idx]) - roc_auc(yb, scores_b[idx])
+        b += 1
     alpha = (1.0 - ci) / 2.0
     lo, hi = np.quantile(diffs, [alpha, 1.0 - alpha])
     p = 2.0 * min((diffs >= 0).mean(), (diffs <= 0).mean())
     return {"diff": float(diff_point), "lo": float(lo), "hi": float(hi),
-            "p_two_sided": float(min(p, 1.0))}
+            "p_two_sided": float(min(p, 1.0)),
+            "n_resamples_skipped": int(skipped)}
 
 
 def holm_bonferroni(pvals: list[float]) -> list[float]:

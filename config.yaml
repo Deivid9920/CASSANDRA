@@ -57,7 +57,11 @@ abstention:
 
 ensemble:
   enabled: true
-  prometheus_graph: null         # path to PROMETHEUS-NS consistency graph; null = skip
+  # Real consistency graph exported from the PROMETHEUS-NS symbolic
+  # store (4442 store triplets -> 13225 bridge rows incl. documented
+  # predicate-surface aliases; see prometheus-ns
+  # scripts/export_consistency_graph.py). null restores the anchor.
+  prometheus_graph: data/external/prometheus_graph.json
 
 colab:
   auto_setup: true

@@ -21,7 +21,8 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 NB_ORDER = ["01_data_exploration.ipynb", "02_activation_analysis.ipynb",
-            "03_probe_evaluation.ipynb", "04_generation_case_study.ipynb"]
+            "03_probe_evaluation.ipynb", "04_generation_case_study.ipynb",
+            "05_symbolic_bridge.ipynb"]
 
 
 def ensure_kernel() -> None:
@@ -90,7 +91,7 @@ def main() -> None:
         print(f"  ok: {name} ({len(nb.cells)} cells, executed in place)",
               flush=True)
 
-    print("all four notebooks executed without errors")
+    print(f"all {len(NB_ORDER)} notebooks executed without errors")
 
 
 if __name__ == "__main__":

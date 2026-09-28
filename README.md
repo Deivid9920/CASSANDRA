@@ -16,9 +16,9 @@ flowchart LR
     P --> E[stats: AUC + CI bootstrap,\npaired vs logprob baseline,\nHolm correction, ECE]
     G --> SC[probe scoring\n+ string-match ground truth]
     SC --> AB[coverage-accuracy\nabstention curve, tau*]
-    E --> NB[4 notebooks\nEDA / activations / probes / case study]
+    E --> NB[5 notebooks\nEDA / activations / probes / case study / bridge]
     AB --> NB
-    PS[PROMETHEUS-NS symbolic graph] -.optional.-> EN[ensemble\nprobe x symbolic]
+    PS[PROMETHEUS-NS symbolic graph] --> EN[ensemble\nprobe x symbolic]
     SC --> EN
 ```
 
@@ -47,9 +47,9 @@ make extract      # activations for gpt2 + pythia-410m (idempotent, resumable)
 make probe        # grouped-CV probes over the pre-registered grid
 make report       # tables + figures from out-of-fold predictions
 make generate     # TriviaQA generations + scoring + abstention
-make notebooks    # (re)generate the 4 notebooks and execute them headless
-make ensemble     # symbolic ensemble eval (unavailable until a graph is wired)
-make test         # all contracts green (37 tests)
+make notebooks    # (re)generate the 5 notebooks and execute them headless
+make ensemble     # symbolic ensemble eval against the wired PROMETHEUS-NS graph
+make test         # all contracts green (42 tests)
 ```
 
 The resolved environment of the reference run is recorded in `requirements.freeze.txt` (Python 3.10.21, torch 2.4.1+cpu, transformer-lens 2.15.0, transformers 4.46.3). On this reference machine the venv was pinned to Python 3.10 via `uv venv --python 3.10 .venv` for exact spec fidelity; `make setup` reproduces the same pins with any Python 3.10+ interpreter as `python3`.
@@ -81,7 +81,10 @@ Every number below comes from an executed run whose artifacts live in `logs/` (o
 | tau* -> (coverage, accuracy) at min_coverage 0.6 | 0.645 -> (0.60, 0.018) | 0.465 -> (0.64, 0.093) |
 | abstention gain vs always answering | +0.005 | +0.027 |
 | ECE on generations | 0.662 | 0.522 |
-| ensemble AUC | unavailable | unavailable |
+| graph coverage of extractable claims (tuples / subjects) | 0 / 146 (8/138 subjects) | 0 / 107 (6/92 subjects) |
+| symbolic signal AUC (constant unknown = 0.5 by construction) | 0.500 | 0.500 |
+| ensemble AUC (OOF, probe x symbolic) | 0.448 | 0.670 |
+| paired diff AUC (ensemble - probe), 95% CI | -0.319 [-0.572, -0.078], p ~ 0.000 | -0.020 [-0.074, +0.022], p = 0.356 |
 
 The layer profile replicates the literature: the signal peaks mid-stack (gpt2 layer 5 of 12; pythia layer 11 of 24) and declines toward the final layer. The full grid (2 models x 4 layers x 2 feature modes x 2 probe types = 32 configurations, each with per-domain rows) is in `docs/probe_table.md` and `logs/probe_results.jsonl`.
 
@@ -90,7 +93,7 @@ The layer profile replicates the literature: the signal peaks mid-stack (gpt2 la
 - **Stylistic confound (TF-IDF).** A logistic probe over TF-IDF 1-2 grams of the raw statements, same grouped folds: AUC 0.486 [0.472, 0.502] - chance. The neural probe's signal is not a lexical artifact of this dataset version (e.g. "not" in false statements); the confound the Azaria & Mitchell literature warns about is absent here, and the probe's advantage cannot be explained by bag-of-words style.
 - **Minimal pairs (same subject, same template, opposite truth).** Only 1 such pair exists in the vendored dataset files, so the paired-subset control is inconclusive (reported for completeness in `logs/style_pairs.json`, not as evidence).
 - **Leakage gate.** No configuration exceeded AUC 0.95; the mandatory audit was never triggered. Expectation band from the literature (0.70-0.85 mid-layer) was respected by every top configuration.
-- **Ensemble.** `config.ensemble.prometheus_graph` is null by anchor contract, so the ensemble is recorded as "unavailable" with its cause in `logs/ensemble_results.json`. The bridge itself is implemented and pinned by tests (`tests/test_ensemble.py`, synthetic graph): wiring a PROMETHEUS-NS graph export and re-running `make ensemble` activates the full probe-vs-signal-vs-ensemble comparison on the extractable subset.
+- **Ensemble (evaluated, honest negative).** The anchor shipped `prometheus_graph: null` and recorded "unavailable" with its cause. The wired-in case is now measured: the REAL consistency graph exported from PROMETHEUS-NS's own crawled corpus (4442 store triplets -> 13225 bridge rows incl. documented predicate-surface aliases; 0 contradicted pairs) covers **zero** of the generations' extractable claim tuples (entity-level overlap exists: 8/138 gpt2 and 6/92 pythia subjects appear in the graph, but no (subject, predicate, object) tuple matches), so the symbolic signal is constant 0.5 and the ensemble degenerates: AUC -0.319 vs probe alone on gpt2 (CI excludes 0; the extractable subset holds only 2 positives and 153/1000 bootstrap resamples had to be redrawn, both reported) and -0.020 (n.s.) on pythia-410m. Operational conclusion: do NOT route decisions through the bridge until the graph has general-knowledge coverage; the machinery is tested end to end and a domain-matched graph would feed it without code changes. Full analysis: notebook `05_symbolic_bridge.ipynb`, `docs/ensemble_table.md`, `logs/ensemble_results*.json`.
 
 ## Limits (honest; numbers from the runs above)
 
@@ -111,5 +114,6 @@ The layer profile replicates the literature: the signal peaks mid-stack (gpt2 la
 | `02_activation_analysis.ipynb` | PCA of residual activations per layer, L2 norms, AUC heatmap layer x domain |
 | `03_probe_evaluation.ipynb` | ROC/PR with bootstrap CIs, paired test vs logprob baseline, Holm correction, calibration |
 | `04_generation_case_study.ipynb` | Probe vs factual agreement on generations, abstention curve, confabulation case studies |
+| `05_symbolic_bridge.ipynb` | PROMETHEUS-NS graph anatomy, claim coverage (entity vs tuple), ensemble outcome, machinery check |
 
 The notebooks are committed executed; `make notebooks` re-executes them end to end without errors. Markdown cells describe what each figure shows and how to read it - every number rendered comes from the executed environment.

@@ -116,6 +116,15 @@ def evaluate_ensemble(cfg: dict, scored: pd.DataFrame, graph: dict
     from cassandra_ns.probes.stats import (paired_bootstrap_diff_auc,
                                            roc_auc)
 
+    # rows without a ground-truth label (excluded generations: no
+    # declarative sentence, alias contained in the question) carry no
+    # evaluation information; they are dropped and the drop is
+    # reported, never silently forced to any class
+    n_no_label = int(scored["correct"].isna().sum())
+    scored = scored[scored["correct"].notna()].reset_index(drop=True)
+    if scored["score"].isna().any():
+        raise ValueError("scored rows with NaN probe score: the "
+                         "ensemble requires a finite score per row")
     sentences = scored["first_sentence"].tolist()
     claims_per_row = [extract_triplets(s) for s in sentences]
     extractable = [i for i, c in enumerate(claims_per_row) if c]
@@ -131,6 +140,39 @@ def evaluate_ensemble(cfg: dict, scored: pd.DataFrame, graph: dict
     signal = np.array([symbolic_signal(graph, c) for c in sub_claims])
     probe = sub["score"].to_numpy()
     y = sub["correct"].astype(int).to_numpy()
+
+    # coverage statistics of the graph over the extracted claims: the
+    # bridge reports how much of the claim space the graph actually
+    # knows, because an ensemble over a ~unknown signal degenerates to
+    # the probe and that finding must be traceable to its cause
+    n_claim_tuples = sum(len(c) for c in sub_claims)
+    n_supported_tuples = sum(1 for c in sub_claims
+                             for t in c if t in graph["supported"])
+    n_contradicted_tuples = sum(1 for c in sub_claims
+                                for t in c if t in graph["contradicted"])
+    graph_subjects = {t[0] for t in graph["supported"] | graph["contradicted"]}
+    row_subjects = {c[0][0] for c in sub_claims if c}
+    signal_values, signal_counts = np.unique(signal, return_counts=True)
+    coverage = {
+        "n_rows_no_label_excluded": n_no_label,
+        "n_rows_extractable": len(sub),
+        "n_claim_tuples": n_claim_tuples,
+        "n_claim_tuples_supported": n_supported_tuples,
+        "n_claim_tuples_contradicted": n_contradicted_tuples,
+        "n_claim_tuples_unknown": n_claim_tuples - n_supported_tuples
+                                  - n_contradicted_tuples,
+        "n_rows_signal_supported": int(signal_counts[signal_values == 1.0][0])
+                                   if 1.0 in signal_values else 0,
+        "n_rows_signal_contradicted": int(signal_counts[signal_values == 0.0][0])
+                                      if 0.0 in signal_values else 0,
+        "n_rows_signal_unknown": int(signal_counts[signal_values == 0.5][0])
+                                 if 0.5 in signal_values else 0,
+        "graph_supported_rows": len(graph["supported"]),
+        "graph_contradicted_rows": len(graph["contradicted"]),
+        "graph_unique_subjects": len(graph_subjects),
+        "claim_subjects_in_graph": len(row_subjects & graph_subjects),
+        "claim_subjects_total": len(row_subjects),
+    }
 
     # out-of-fold ensemble scores: the 2-feature model never sees the
     # row it scores
@@ -166,6 +208,7 @@ def evaluate_ensemble(cfg: dict, scored: pd.DataFrame, graph: dict
         "auc_ensemble": auc_ensemble,
         "ensemble_minus_probe": paired_e_p,
         "probe_minus_signal": paired_p_s,
+        "coverage": coverage,
         "note": "the comparison holds for the extractable is_a subset "
                 "only, not for all generations",
     }

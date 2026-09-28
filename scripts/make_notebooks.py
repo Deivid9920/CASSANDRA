@@ -257,7 +257,7 @@ NB2_CELLS = [
        "idempotent extraction CLI."),
     code(GUARD_CELL),
     code("""\
-_ensure("artifacts/activations/gpt2_index.csv",
+_ensure("artifacts/activations/gpt2_vectors.f16",
         ["scripts/extract_activations.py", "--config", "config.yaml",
          "--model", "gpt2"])"""),
     code("""\
@@ -792,11 +792,285 @@ else:
        "claims in notebook 03."),
 ]
 
+NB5_CELLS = [
+    code(CELL_TEMPLATE),
+    md(
+        "# 05 — Symbolic bridge to PROMETHEUS-NS\n\n"
+        "**Objective.** Evaluate the symbolic-neural ensemble with the "
+        "REAL consistency graph exported from the PROMETHEUS-NS "
+        "symbolic store (its own crawled arXiv + Gutenberg corpus), "
+        "measure how much of the generations' claim space the graph "
+        "actually covers, and report the ensemble outcome — whatever "
+        "it is.\n\n"
+        "**Why it matters.** The anchor run of notebook 04 recorded "
+        "the ensemble as unavailable (no graph). This notebook is the "
+        "wired-in case: `config.ensemble.prometheus_graph` now points "
+        "to `data/external/prometheus_graph.json`, produced by "
+        "prometheus-ns `scripts/export_consistency_graph.py` (4442 "
+        "store triplets; documented predicate-surface aliases; "
+        "contradictions quarantined as contradicted rows).\n\n"
+        "**Honesty contract.** Coverage is a first-class result, not "
+        "a footnote: if the graph knows nothing about the claims, the "
+        "signal is constant, the ensemble degenerates, and THAT is "
+        "the reported finding with its cause."),
+    md("## Environment and determinism"),
+    code(SEED_CELL),
+    code(PLOT_CELL),
+    md("## Graph anatomy\n\n"
+       "The bridge file is a flat list of (subject, predicate, "
+       "object, consistent) rows. The canonical rows carry the "
+       "PROMETHEUS-NS lemmatised relation (`is_a`, `write`, ...); "
+       "alias rows repeat the same subject/object with the surface "
+       "verbs of CASSANDRA's closed verb list so the two predicate "
+       "schemas can interoperate. The alias adapter renames "
+       "predicates only — it never invents subjects, objects or "
+       "verdicts."),
+    code("""\
+import json
+from pathlib import Path
+
+if not Path("data/external/prometheus_graph.json").is_file():
+    raise RuntimeError("data/external/prometheus_graph.json missing: "
+                       "export it from prometheus-ns with "
+                       "scripts/export_consistency_graph.py and copy "
+                       "it into data/external/")
+
+raw = json.loads(Path("data/external/prometheus_graph.json")
+                 .read_text(encoding="utf-8"))
+graph_rows = raw["triplets"]
+meta = raw.get("meta", {})
+
+rows = pd.DataFrame(graph_rows, columns=["sub", "pred", "obj", "ok"])
+anatomy = {
+    "bridge_rows": len(rows),
+    "supported": int(rows["ok"].sum()),
+    "contradicted": int((~rows["ok"]).sum()),
+    "unique_subjects": rows["sub"].nunique(),
+    "unique_objects": rows["obj"].nunique(),
+    "store_triplets": meta.get("n_store_triplets"),
+    "predicate_adapter": meta.get("predicate_adapter", "")[:60] + "...",
+}
+pd.Series(anatomy)"""),
+    md("Predicate mass of the store: the corpus is technical and "
+       "literary (arXiv + Gutenberg), dominated by `is_a` copula "
+       "patterns. This composition is the prior that will decide "
+       "coverage against open-domain trivia claims."),
+    code("""\
+top_pred = (rows.groupby(["pred"])["sub"].count()
+            .sort_values(ascending=False).head(12))
+
+fig, ax = plt.subplots(figsize=(8.2, 4.2))
+top_pred[::-1].plot.barh(ax=ax, color="#4c78a8")
+ax.set_xlabel("bridge rows")
+ax.set_title("PROMETHEUS-NS graph: top predicates")
+fig.tight_layout()
+save_figure(fig, "05_graph_anatomy")
+plt.show()"""),
+    md("## Claims extracted from the generations\n\n"
+       "The same shallow extractor the ensemble uses at evaluation "
+       "time runs over every first declarative sentence, per model. "
+       "Rows whose `correct` is NA were excluded by the scorer (no "
+       "declarative sentence, alias contained in the question) and "
+       "are reported here, never forced."),
+    code(GUARD_CELL),
+    code("""\
+_ensure("logs/ensemble_results.json",
+        ["scripts/ensemble_eval.py", "--config", "config.yaml"])
+
+from cassandra_ns.config import load_config
+from cassandra_ns.ensemble.symbolic_bridge import extract_triplets
+from cassandra_ns.generation.scoring import load_scored
+CFG = load_config("config.yaml")
+claim_stats = {}
+for model in ["gpt2", "pythia-410m"]:
+    df = load_scored(CFG, model)
+    n_no_label = int(df["correct"].isna().sum())
+    lab = df[df["correct"].notna()]
+    claims = lab["first_sentence"].map(
+        lambda s: extract_triplets(s))
+    claim_stats[model] = {
+        "labeled": len(lab),
+        "no_label_excluded": n_no_label,
+        "extractable": int(claims.map(bool).sum()),
+        "claim_tuples": int(claims.map(len).sum()),
+        "correct_in_extractable": int(
+            lab.loc[claims.map(bool), "correct"].sum()),
+    }
+pd.DataFrame(claim_stats).T.astype(int)"""),
+    md("## Coverage: how much does the graph know?\n\n"
+       "Three levels, from loose to strict: subjects that appear "
+       "anywhere in the graph (entity-level), (subject, predicate, "
+       "object) tuples present as supported or contradicted rows "
+       "(claim-level), and the resulting symbolic signal per row. "
+       "Entity overlap can be nonzero while tuple coverage is zero: "
+       "knowing the word is not knowing the fact."),
+    code("""\
+from cassandra_ns.ensemble.symbolic_bridge import (load_graph,
+                                                   symbolic_signal)
+
+graph = load_graph(CFG["ensemble"]["prometheus_graph"])
+graph_subjects = {t[0] for t in
+                  graph["supported"] | graph["contradicted"]}
+
+cov_rows = []
+for model in ["gpt2", "pythia-410m"]:
+    df = load_scored(CFG, model)
+    lab = df[df["correct"].notna()]
+    claims = lab["first_sentence"].map(extract_triplets)
+    sub = lab[claims.map(bool)]
+    sub_claims = list(claims[claims.map(bool)])
+    tuples = [t for c in sub_claims for t in c]
+    sig = [symbolic_signal(graph, c) for c in sub_claims]
+    subjects = {c[0][0] for c in sub_claims if c}
+    cov_rows.append({
+        "model": model,
+        "rows_extractable": len(sub),
+        "claim_tuples": len(tuples),
+        "tuples_supported": sum(t in graph["supported"] for t in tuples),
+        "tuples_contradicted": sum(t in graph["contradicted"]
+                                   for t in tuples),
+        "subjects_in_graph": len(subjects & graph_subjects),
+        "subjects_total": len(subjects),
+        "signal=1": int(np.sum(np.array(sig) == 1.0)),
+        "signal=0": int(np.sum(np.array(sig) == 0.0)),
+        "signal=0.5": int(np.sum(np.array(sig) == 0.5)),
+    })
+coverage_df = pd.DataFrame(cov_rows).set_index("model")
+coverage_df"""),
+    code("""\
+labels = coverage_df.index.tolist()
+x = np.arange(len(labels))
+subj_share = coverage_df["subjects_in_graph"] / coverage_df["subjects_total"]
+tup_share = ((coverage_df["tuples_supported"]
+              + coverage_df["tuples_contradicted"])
+             / coverage_df["claim_tuples"])
+
+fig, ax = plt.subplots(figsize=(7.8, 4.2))
+ax.bar(x - 0.18, subj_share, 0.36, label="entity-level subjects",
+       color="#4c78a8")
+ax.bar(x + 0.18, tup_share, 0.36, label="claim-level tuples",
+       color="#e45756")
+ax.set_xticks(x, labels)
+ax.set_ylabel("fraction covered by the graph")
+ax.legend()
+fig.tight_layout()
+save_figure(fig, "05_coverage")
+plt.show()"""),
+    md("## Ensemble outcome on the extractable subset\n\n"
+       "The records below are produced by `scripts/ensemble_eval.py`: "
+       "the 2-feature logistic ensemble fitted out-of-fold (5 folds, "
+       "seed 42) on (probe score, symbolic signal), compared against "
+       "each component alone with a paired bootstrap on identical "
+       "rows. Resamples containing a single class are redrawn and "
+       "counted (`n_resamples_skipped`) instead of crashing — with "
+       "gpt2's 2 positives in 146 extractable rows this happens for "
+       "a non-trivial fraction of draws, which is itself part of the "
+       "statistical picture."),
+    code("""\
+ens_docs = {}
+for model, fname in [("gpt2", "ensemble_results.json"),
+                     ("pythia-410m",
+                      "ensemble_results_pythia-410m.json")]:
+    path = Path("logs") / fname
+    if not path.is_file():
+        raise RuntimeError(f"{path} missing: run make ensemble")
+    ens_docs[model] = json.loads(path.read_text(encoding="utf-8"))
+
+pd.DataFrame({
+    model: {
+        "status": d["status"],
+        "auc_probe": round(d["auc_probe"], 3),
+        "auc_signal": round(d["auc_signal"], 3),
+        "auc_ensemble": round(d["auc_ensemble"], 3),
+        "ens-probe diff": round(d["ensemble_minus_probe"]["diff"], 3),
+        "CI lo": round(d["ensemble_minus_probe"]["lo"], 3),
+        "CI hi": round(d["ensemble_minus_probe"]["hi"], 3),
+        "p": round(d["ensemble_minus_probe"]["p_two_sided"], 3),
+        "skipped resamples":
+            d["ensemble_minus_probe"]["n_resamples_skipped"],
+    }
+    for model, d in ens_docs.items()
+})"""),
+    code("""\
+fig, ax = plt.subplots(figsize=(7.8, 4.2))
+x = np.arange(2)
+width = 0.26
+for k, (key, label, color) in enumerate([
+        ("auc_probe", "probe alone", "#4c78a8"),
+        ("auc_signal", "symbolic signal", "#bab0ac"),
+        ("auc_ensemble", "out-of-fold ensemble", "#e45756")]):
+    vals = [ens_docs[m][key] for m in ["gpt2", "pythia-410m"]]
+    ax.bar(x + (k - 1) * width, vals, width, label=label, color=color)
+ax.set_xticks(x, ["gpt2", "pythia-410m"])
+ax.set_ylabel("AUC (extractable subset)")
+ax.axhline(0.5, color="#555", lw=0.8, ls=":")
+ax.legend()
+fig.tight_layout()
+save_figure(fig, "05_ensemble_auc")
+plt.show()"""),
+    md("## Machinery check with an informative signal (synthetic)\n\n"
+       "Coverage zero means the real signal is constant, so the "
+       "ensemble outcome above cannot say whether the OOF machinery "
+       "would exploit a graph that actually knows things. This check "
+       "injects an ORACLE signal on synthetic labels — clearly "
+       "labelled synthetic, never a result about the models — to "
+       "verify the estimator can combine a second informative "
+       "feature when one exists."),
+    code("""\
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import StratifiedKFold
+from sklearn.preprocessing import StandardScaler
+
+from cassandra_ns.probes.stats import roc_auc
+
+n = 400
+truth = rng.integers(0, 2, size=n)
+probe_syn = np.clip(truth * 0.3 + 0.35 + rng.normal(0, 0.12, n), 0, 1)
+signal_syn = np.where(truth == 1, 1.0, np.where(rng.random(n) < 0.5,
+                                                0.5, 0.0))
+X = np.column_stack([probe_syn, signal_syn])
+oof = np.full(n, np.nan)
+for tr, te in StratifiedKFold(5, shuffle=True,
+                              random_state=SEED).split(X, truth):
+    sc = StandardScaler().fit(X[tr])
+    lr = LogisticRegression(max_iter=1000, random_state=SEED)
+    lr.fit(sc.transform(X[tr]), truth[tr])
+    oof[te] = lr.predict_proba(sc.transform(X[te]))[:, 1]
+
+pd.Series({
+    "auc_probe_synthetic": round(roc_auc(truth, probe_syn), 3),
+    "auc_signal_oracle": round(roc_auc(truth, signal_syn), 3),
+    "auc_ensemble_oof": round(roc_auc(truth, oof), 3),
+})"""),
+    md("## Interpretation and limits\n\n"
+       "- **The bridge is wired and honest:** unavailable (anchor) "
+       "became evaluated (this run), with the coverage block tracing "
+       "every degeneration to its cause.\n"
+       "- **Coverage, not machinery, is the bottleneck:** the real "
+       "graph covers zero claim tuples (entity overlap is small and "
+       "tuple overlap is zero), so the symbolic signal is constant "
+       "and carries no information on this subset.\n"
+       "- **Adding an uninformative feature can HURT:** the "
+       "out-of-fold ensemble degrades the probe on gpt2 (small "
+       "extractable subset, very few positives, bootstrap must skip "
+       "single-class resamples) and is neutral on pythia-410m. The "
+       "operational conclusion is NOT to route decisions through the "
+       "bridge until the graph has domain coverage.\n"
+       "- **The fix is data, not code:** the extraction, export, "
+       "signal and ensemble paths are tested end to end (42 tests); "
+       "giving PROMETHEUS-NS a general-knowledge corpus would feed "
+       "this bridge without changing it.\n"
+       "- **The oracle check is synthetic by design:** it validates "
+       "the estimator, it is not a claim about the models or the "
+       "graph."),
+]
+
 NOTEBOOKS = {
     "01_data_exploration.ipynb": NB1_CELLS,
     "02_activation_analysis.ipynb": NB2_CELLS,
     "03_probe_evaluation.ipynb": NB3_CELLS,
     "04_generation_case_study.ipynb": NB4_CELLS,
+    "05_symbolic_bridge.ipynb": NB5_CELLS,
 }
 
 
